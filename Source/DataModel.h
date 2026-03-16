@@ -28,7 +28,8 @@ enum class InputMode {
     CopyTranspose,  // Copy: waiting for transpose semitones
     RepeatEnd,      // Repeat end: waiting for repeat count
     DefaultNote,    // Setting default note for new events
-    BaseVelocity    // Setting base velocity
+    BaseVelocity,   // Setting base velocity
+    RotateMeasure   // Rotate current measure by ST ticks
 };
 
 // State for multi-step copy command
@@ -59,41 +60,59 @@ struct RepeatMark {
     int count      = 2;   // Total plays (2 = play twice)
 };
 
-struct Channel {
+// A pattern is a complete event list with repeat marks
+struct Pattern {
     std::vector<Event> events;
+    std::vector<RepeatMark> repeatMarks;
+    int pendingRepeatStart = -1;
+
+    Pattern() {
+        // Start with a single blank event
+        Event e;
+        e.pitch = -1;
+        e.step_time = 30;
+        e.gate_time = 30;
+        events.push_back(e);
+    }
+};
+
+struct Channel {
+    std::vector<Pattern> patterns;
+    int activePattern = 0;  // Which pattern the editor is working on
     int cursorPos   = 0;
     int activeLayer = 0; // Index into Layer enum
     int fieldCursor = 0; // Index into Field enum
 
-    // Repeat marks (multiple allowed per channel)
-    std::vector<RepeatMark> repeatMarks;
-    int pendingRepeatStart = -1; // Temp: event index marked with R, waiting for Shift+R
-
     Channel() {
-        // Start with a single blank event — build from here
-        Event e;
-        e.pitch = -1;       // Blank/unset
-        e.step_time = 30;   // Default 16th at TB=120
-        e.gate_time = 30;   // Default gate = step (legato)
-        events.push_back(e);
+        patterns.emplace_back(); // Start with one pattern
     }
 
+    // Convenience: current pattern's events and marks
+    std::vector<Event>& events() { return patterns[activePattern].events; }
+    const std::vector<Event>& events() const { return patterns[activePattern].events; }
+    std::vector<RepeatMark>& repeatMarks() { return patterns[activePattern].repeatMarks; }
+    const std::vector<RepeatMark>& repeatMarks() const { return patterns[activePattern].repeatMarks; }
+    int& pendingRepeatStart() { return patterns[activePattern].pendingRepeatStart; }
+    int pendingRepeatStart() const { return patterns[activePattern].pendingRepeatStart; }
+
     void clampCursor() {
-        if (events.empty()) {
+        auto& evts = events();
+        if (evts.empty()) {
             cursorPos = 0;
             return;
         }
         if (cursorPos < 0) cursorPos = 0;
-        if (cursorPos >= (int)events.size()) cursorPos = (int)events.size() - 1;
+        if (cursorPos >= (int)evts.size()) cursorPos = (int)evts.size() - 1;
     }
 
     // Find measure number and step-within-measure for a given event index
     void getMeasureInfo(int eventIdx, int& measureNum, int& stepInMeasure) const {
+        auto& evts = events();
         measureNum = 1;
         stepInMeasure = 1;
-        for (int i = 0; i < eventIdx && i < (int)events.size(); ++i) {
+        for (int i = 0; i < eventIdx && i < (int)evts.size(); ++i) {
             ++stepInMeasure;
-            if (events[i].measure_end) {
+            if (evts[i].measure_end) {
                 ++measureNum;
                 stepInMeasure = 1;
             }
@@ -102,42 +121,53 @@ struct Channel {
 
     // Find the end event index (exclusive) of a given measure number (1-based)
     int findMeasureEnd(int targetMeasure) const {
+        auto& evts = events();
         int measure = 1;
-        for (int i = 0; i < (int)events.size(); ++i) {
-            if (events[i].measure_end) {
+        for (int i = 0; i < (int)evts.size(); ++i) {
+            if (evts[i].measure_end) {
                 if (measure == targetMeasure)
                     return i + 1; // Exclusive end
                 ++measure;
             }
         }
-        // If target measure is the last (or only) measure, end is the list end
         if (measure == targetMeasure)
-            return (int)events.size();
-        return (int)events.size();
+            return (int)evts.size();
+        return (int)evts.size();
     }
 
     // Extract events from a range of measures [startMeas, endMeas] (1-based, inclusive)
     std::vector<Event> getEventsInMeasureRange(int startMeas, int endMeas) const {
         int startIdx = findMeasureStart(startMeas);
         int endIdx = findMeasureEnd(endMeas);
-        if (startIdx >= (int)events.size() || startIdx >= endIdx)
+        auto& evts = events();
+        if (startIdx >= (int)evts.size() || startIdx >= endIdx)
             return {};
-        return std::vector<Event>(events.begin() + startIdx, events.begin() + endIdx);
+        return std::vector<Event>(evts.begin() + startIdx, evts.begin() + endIdx);
     }
 
     // Find the first event index of a given measure number (1-based)
     int findMeasureStart(int targetMeasure) const {
+        auto& evts = events();
         int measure = 1;
         if (targetMeasure <= 1) return 0;
-        for (int i = 0; i < (int)events.size(); ++i) {
-            if (events[i].measure_end) {
+        for (int i = 0; i < (int)evts.size(); ++i) {
+            if (evts[i].measure_end) {
                 ++measure;
                 if (measure == targetMeasure) {
-                    return std::min(i + 1, (int)events.size() - 1);
+                    return std::min(i + 1, (int)evts.size() - 1);
                 }
             }
         }
-        return (int)events.size() - 1; // Past last measure
+        return (int)evts.size() - 1;
+    }
+
+    // Total ticks in a measure range
+    int measureTotalTicks(int startIdx, int endIdx) const {
+        auto& evts = events();
+        int total = 0;
+        for (int i = startIdx; i < endIdx && i < (int)evts.size(); ++i)
+            total += evts[i].step_time;
+        return total;
     }
 };
 
@@ -174,9 +204,10 @@ inline std::string midiNoteToName(int note) {
     return std::string(names[note % 12]) + std::to_string(octave);
 }
 
-// Undo/redo snapshot of a single channel
+// Undo/redo snapshot of a single channel (includes all patterns)
 struct ChannelSnapshot {
-    std::vector<Event> events;
+    std::vector<Pattern> patterns;
+    int activePattern = 0;
     int cursorPos = 0;
     int fieldCursor = 0;
     int activeLayer = 0;

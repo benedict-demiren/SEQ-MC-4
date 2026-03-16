@@ -125,23 +125,59 @@ static mc4::RepeatMark varToRepeatMark(const juce::var& v)
     return rm;
 }
 
-static juce::var channelToVar(const mc4::Channel& ch)
+static juce::var patternToVar(const mc4::Pattern& pat)
 {
     auto* obj = new juce::DynamicObject();
 
     juce::Array<juce::var> evts;
-    for (const auto& e : ch.events)
+    for (const auto& e : pat.events)
         evts.add(eventToVar(e));
     obj->setProperty("events", evts);
+
+    juce::Array<juce::var> rmarks;
+    for (const auto& rm : pat.repeatMarks)
+        rmarks.add(repeatMarkToVar(rm));
+    obj->setProperty("repeats", rmarks);
+
+    return juce::var(obj);
+}
+
+static mc4::Pattern varToPattern(const juce::var& v)
+{
+    mc4::Pattern pat;
+    pat.events.clear(); // Remove default event
+    if (auto* obj = v.getDynamicObject()) {
+        if (auto* evts = obj->getProperty("events").getArray()) {
+            for (const auto& ev : *evts)
+                pat.events.push_back(varToEvent(ev));
+        }
+        if (pat.events.empty()) {
+            mc4::Event e;
+            e.pitch = -1;
+            e.gate_time = 30;
+            pat.events.push_back(e);
+        }
+        if (auto* rmarks = obj->getProperty("repeats").getArray()) {
+            for (const auto& rm : *rmarks)
+                pat.repeatMarks.push_back(varToRepeatMark(rm));
+        }
+    }
+    return pat;
+}
+
+static juce::var channelToVar(const mc4::Channel& ch)
+{
+    auto* obj = new juce::DynamicObject();
+
+    juce::Array<juce::var> pats;
+    for (const auto& p : ch.patterns)
+        pats.add(patternToVar(p));
+    obj->setProperty("patterns", pats);
+    obj->setProperty("activePat", ch.activePattern);
 
     obj->setProperty("cursor", ch.cursorPos);
     obj->setProperty("layer", ch.activeLayer);
     obj->setProperty("field", ch.fieldCursor);
-
-    juce::Array<juce::var> rmarks;
-    for (const auto& rm : ch.repeatMarks)
-        rmarks.add(repeatMarkToVar(rm));
-    obj->setProperty("repeats", rmarks);
 
     return juce::var(obj);
 }
@@ -149,28 +185,39 @@ static juce::var channelToVar(const mc4::Channel& ch)
 static void varToChannel(const juce::var& v, mc4::Channel& ch)
 {
     if (auto* obj = v.getDynamicObject()) {
-        ch.events.clear();
-        if (auto* evts = obj->getProperty("events").getArray()) {
-            for (const auto& ev : *evts)
-                ch.events.push_back(varToEvent(ev));
+        // Load patterns (new format)
+        if (auto* pats = obj->getProperty("patterns").getArray()) {
+            ch.patterns.clear();
+            for (const auto& p : *pats)
+                ch.patterns.push_back(varToPattern(p));
+            if (ch.patterns.empty())
+                ch.patterns.emplace_back();
         }
-        // Ensure at least one event
-        if (ch.events.empty()) {
-            mc4::Event e;
-            e.pitch = -1;
-            e.gate_time = 30;
-            ch.events.push_back(e);
+        // Backwards compat: old format had "events" and "repeats" at channel level
+        else if (auto* evts = obj->getProperty("events").getArray()) {
+            ch.patterns.clear();
+            mc4::Pattern pat;
+            pat.events.clear();
+            for (const auto& ev : *evts)
+                pat.events.push_back(varToEvent(ev));
+            if (pat.events.empty()) {
+                mc4::Event e;
+                e.pitch = -1;
+                e.gate_time = 30;
+                pat.events.push_back(e);
+            }
+            if (auto* rmarks = obj->getProperty("repeats").getArray()) {
+                for (const auto& rm : *rmarks)
+                    pat.repeatMarks.push_back(varToRepeatMark(rm));
+            }
+            ch.patterns.push_back(pat);
         }
 
+        ch.activePattern = std::max(0, std::min((int)ch.patterns.size() - 1,
+                                                 (int)obj->getProperty("activePat")));
         ch.cursorPos   = (int)obj->getProperty("cursor");
         ch.activeLayer = (int)obj->getProperty("layer");
         ch.fieldCursor = (int)obj->getProperty("field");
-
-        ch.repeatMarks.clear();
-        if (auto* rmarks = obj->getProperty("repeats").getArray()) {
-            for (const auto& rm : *rmarks)
-                ch.repeatMarks.push_back(varToRepeatMark(rm));
-        }
 
         ch.clampCursor();
     }

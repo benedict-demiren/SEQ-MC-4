@@ -30,7 +30,9 @@ void PlaybackEngine::processMidi(juce::MidiBuffer& midiBuffer,
     }
 
     for (int ch = 0; ch < 4; ++ch) {
-        processChannel(midiBuffer, ch, numSamples, seq.channels[ch], seq, config);
+        const auto& channel = seq.channels[ch];
+        const auto& pat = channel.patterns[channel.activePattern];
+        processChannel(midiBuffer, ch, numSamples, channel, pat, seq, config);
     }
 }
 
@@ -38,12 +40,13 @@ void PlaybackEngine::processChannel(juce::MidiBuffer& midiBuffer,
                                      int channelIdx,
                                      int numSamples,
                                      const Channel& channel,
+                                     const Pattern& pattern,
                                      const Sequence& seq,
                                      const Config& config)
 {
     auto& ps = playState[channelIdx];
 
-    if (channel.events.empty() || ps.finished)
+    if (pattern.events.empty() || ps.finished)
         return;
 
     // MPE member channels 1-4 (JUCE uses 1-based)
@@ -54,7 +57,7 @@ void PlaybackEngine::processChannel(juce::MidiBuffer& midiBuffer,
                                   / (60.0 * sampleRate);
 
     for (int sample = 0; sample < numSamples; ++sample) {
-        const auto& event = channel.events[ps.eventIndex];
+        const auto& event = pattern.events[ps.eventIndex];
 
         // Check if we need to fire note-off (gate expired)
         if (ps.noteIsOn) {
@@ -80,8 +83,8 @@ void PlaybackEngine::processChannel(juce::MidiBuffer& midiBuffer,
             ps.eventIndex++;
 
             // Check repeat marks: did we just pass a repeat end?
-            for (int mi = 0; mi < (int)channel.repeatMarks.size(); ++mi) {
-                const auto& mark = channel.repeatMarks[mi];
+            for (int mi = 0; mi < (int)pattern.repeatMarks.size(); ++mi) {
+                const auto& mark = pattern.repeatMarks[mi];
                 if (ps.eventIndex > mark.endEvent && mark.startEvent >= 0 && mark.endEvent >= 0) {
                     // Find this mark in the repeat stack
                     bool found = false;
@@ -110,7 +113,7 @@ void PlaybackEngine::processChannel(juce::MidiBuffer& midiBuffer,
                 }
             }
 
-            if (ps.eventIndex >= (int)channel.events.size()) {
+            if (ps.eventIndex >= (int)pattern.events.size()) {
                 if (seq.cycleOn) {
                     ps.eventIndex = 0;
                     ps.repeatStack.clear(); // Reset repeat state on cycle
@@ -121,7 +124,7 @@ void PlaybackEngine::processChannel(juce::MidiBuffer& midiBuffer,
             }
 
             // Fire note-on for new event (if gate_time > 0 and pitch is valid)
-            const auto& nextEvent = channel.events[ps.eventIndex];
+            const auto& nextEvent = pattern.events[ps.eventIndex];
             if (nextEvent.gate_time > 0 && nextEvent.pitch >= 0) {
                 int velocity = (nextEvent.velocity >= 0) ? nextEvent.velocity : config.baseVelocity;
                 if (nextEvent.accent)

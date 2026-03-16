@@ -71,6 +71,7 @@ private:
                         int channelIdx,
                         int numSamples,
                         const Channel& channel,
+                        const Pattern& pattern,
                         const Sequence& seq,
                         const Config& config);
 

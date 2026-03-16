@@ -28,6 +28,7 @@ static const char* inputModeName(mc4::InputMode mode) {
         case mc4::InputMode::RepeatEnd:     return "REPEAT COUNT: ";
         case mc4::InputMode::DefaultNote:   return "DEFAULT NOTE: ";
         case mc4::InputMode::BaseVelocity:  return "BASE VELOCITY: ";
+        case mc4::InputMode::RotateMeasure: return "ROTATE BY ST: ";
         default: return "> ";
     }
 }
@@ -67,23 +68,23 @@ void SEQMC4Editor::timerCallback() {
             pushUndo();
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
-            if (!c.events.empty()) {
-                auto& evt = c.events[c.cursorPos];
+            if (!c.events().empty()) {
+                auto& evt = c.events()[c.cursorPos];
                 evt.pitch = pitch;
                 evt.velocity = velocity;
                 // If gate is 0 (rest), set it to step_time (legato) so it actually plays
                 if (evt.gate_time == 0)
                     evt.gate_time = evt.step_time;
                 // Advance cursor
-                if (c.cursorPos < (int)c.events.size() - 1) {
+                if (c.cursorPos < (int)c.events().size() - 1) {
                     c.cursorPos++;
                 } else {
                     // At end of list — auto-insert a new event
                     mc4::Event def;
                     def.pitch = -1;
                     def.gate_time = def.step_time; // legato default
-                    c.events.push_back(def);
-                    c.cursorPos = (int)c.events.size() - 1;
+                    c.events().push_back(def);
+                    c.cursorPos = (int)c.events().size() - 1;
                 }
             }
         }
@@ -170,22 +171,31 @@ void SEQMC4Editor::drawStatusBar(juce::Graphics& g, int y)
     g.drawText(juce::String("CYC:") + (s.cycleOn ? "ON" : "OFF"), x, y, 65, kLineHeight, juce::Justification::left);
     x += 70;
 
+    // Pattern number (only show if more than 1 pattern exists)
+    auto& thisCh = ch();
+    if (thisCh.patterns.size() > 1) {
+        g.setColour(juce::Colour(0xff66ccff)); // Light blue for pattern
+        g.drawText("P:" + juce::String(thisCh.activePattern + 1) + "/" + juce::String(thisCh.patterns.size()),
+                   x, y, 55, kLineHeight, juce::Justification::left);
+        x += 58;
+    }
+
     // Event count
     g.setColour(dimColor);
-    g.drawText(juce::String(ch().events.size()) + " events", x, y, 80, kLineHeight, juce::Justification::left);
+    g.drawText(juce::String(thisCh.events().size()) + "ev", x, y, 50, kLineHeight, juce::Justification::left);
 }
 
 void SEQMC4Editor::drawCurrentEvent(juce::Graphics& g, int y)
 {
     auto& c = ch();
-    if (c.events.empty()) {
+    if (c.events().empty()) {
         g.setColour(dimColor);
         g.drawText("(no events)", kMargin, y, 300, kLineHeight, juce::Justification::left);
         return;
     }
 
     // Make a copy of the event so we can apply live preview
-    mc4::Event evt = c.events[c.cursorPos];
+    mc4::Event evt = c.events()[c.cursorPos];
 
     // Live preview: if there's input in the buffer and we're in Normal mode,
     // temporarily apply the typed value to the active field for display
@@ -240,7 +250,7 @@ void SEQMC4Editor::drawContextView(juce::Graphics& g, int y)
 
     for (int line = 0; line < kContextLines; ++line) {
         int idx = c.cursorPos - halfView + line;
-        if (idx >= 0 && idx < (int)c.events.size()) {
+        if (idx >= 0 && idx < (int)c.events().size()) {
             drawContextRow(g, y + line * kLineHeight, idx, idx == c.cursorPos);
         }
     }
@@ -249,7 +259,7 @@ void SEQMC4Editor::drawContextView(juce::Graphics& g, int y)
 void SEQMC4Editor::drawContextRow(juce::Graphics& g, int y, int eventIdx, bool isCursor)
 {
     auto& c = ch();
-    const auto& evt = c.events[eventIdx];
+    const auto& evt = c.events()[eventIdx];
 
     if (isCursor) {
         g.setColour(juce::Colour(0xff0a3020));
@@ -320,10 +330,10 @@ void SEQMC4Editor::drawContextRow(juce::Graphics& g, int y, int eventIdx, bool i
         auto& c = ch();
         juce::String repInd;
         // Pending repeat start
-        if (c.pendingRepeatStart == eventIdx)
+        if (c.pendingRepeatStart() == eventIdx)
             repInd += "R>";
         // Committed repeat marks
-        for (const auto& rm : c.repeatMarks) {
+        for (const auto& rm : c.repeatMarks()) {
             if (rm.startEvent == eventIdx) repInd += "|:";
             if (rm.endEvent == eventIdx)   repInd += "x" + juce::String(rm.count) + ":|";
         }
@@ -512,7 +522,7 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
             int count = std::max(1, std::min(value, 999));
             mc4::Event def;
             for (int i = 0; i < count; ++i)
-                c.events.insert(c.events.begin() + c.cursorPos, def);
+                c.events().insert(c.events().begin() + c.cursorPos, def);
             inputMode = mc4::InputMode::Normal;
             break;
         }
@@ -520,9 +530,9 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
         case mc4::InputMode::DeleteMulti: {
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
-            int count = std::max(1, std::min(value, (int)c.events.size() - c.cursorPos));
-            c.events.erase(c.events.begin() + c.cursorPos,
-                           c.events.begin() + c.cursorPos + count);
+            int count = std::max(1, std::min(value, (int)c.events().size() - c.cursorPos));
+            c.events().erase(c.events().begin() + c.cursorPos,
+                           c.events().begin() + c.cursorPos + count);
             c.clampCursor();
             inputMode = mc4::InputMode::Normal;
             break;
@@ -531,12 +541,12 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
         case mc4::InputMode::Divide: {
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
-            if (c.events.empty() || value < 2) {
+            if (c.events().empty() || value < 2) {
                 inputMode = mc4::InputMode::Normal;
                 break;
             }
             int n = std::min(value, 64); // Cap divisor
-            const auto& orig = c.events[c.cursorPos];
+            const auto& orig = c.events()[c.cursorPos];
             int st = orig.step_time;
             int gt = orig.gate_time;
             int subStep = st / n;
@@ -566,8 +576,8 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
             }
 
             // Replace original with sub-events
-            c.events.erase(c.events.begin() + c.cursorPos);
-            c.events.insert(c.events.begin() + c.cursorPos, subs.begin(), subs.end());
+            c.events().erase(c.events().begin() + c.cursorPos);
+            c.events().insert(c.events().begin() + c.cursorPos, subs.begin(), subs.end());
             inputMode = mc4::InputMode::Normal;
             break;
         }
@@ -631,7 +641,7 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
                     if (copyState.insertMode) {
                         // Copy-insert: ripple-insert at cursor
                         for (int rep = 0; rep < copyState.repetitions; ++rep) {
-                            c.events.insert(c.events.begin() + c.cursorPos,
+                            c.events().insert(c.events().begin() + c.cursorPos,
                                             sourceEvents.begin(), sourceEvents.end());
                         }
                     } else {
@@ -640,10 +650,10 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
                             int destPos = c.cursorPos + rep * (int)sourceEvents.size();
                             for (int i = 0; i < (int)sourceEvents.size(); ++i) {
                                 int idx = destPos + i;
-                                if (idx < (int)c.events.size()) {
-                                    c.events[idx] = sourceEvents[i];
+                                if (idx < (int)c.events().size()) {
+                                    c.events()[idx] = sourceEvents[i];
                                 } else {
-                                    c.events.push_back(sourceEvents[i]);
+                                    c.events().push_back(sourceEvents[i]);
                                 }
                             }
                         }
@@ -676,13 +686,79 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
             int repeatCount = std::max(2, std::min(value, 99));
-            if (c.pendingRepeatStart >= 0 && c.cursorPos > c.pendingRepeatStart) {
+            if (c.pendingRepeatStart() >= 0 && c.cursorPos > c.pendingRepeatStart()) {
                 mc4::RepeatMark mark;
-                mark.startEvent = c.pendingRepeatStart;
+                mark.startEvent = c.pendingRepeatStart();
                 mark.endEvent = c.cursorPos;
                 mark.count = repeatCount;
-                c.repeatMarks.push_back(mark);
-                c.pendingRepeatStart = -1;
+                c.repeatMarks().push_back(mark);
+                c.pendingRepeatStart() = -1;
+            }
+            inputMode = mc4::InputMode::Normal;
+            break;
+        }
+
+        // Rotate measure: circular shift events in current measure by ST ticks
+        case mc4::InputMode::RotateMeasure: {
+            std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+            auto& c = ch();
+            int measure, step;
+            c.getMeasureInfo(c.cursorPos, measure, step);
+            int startIdx = c.findMeasureStart(measure);
+            int endIdx = c.findMeasureEnd(measure);
+            int numEvents = endIdx - startIdx;
+            if (numEvents < 2) { inputMode = mc4::InputMode::Normal; break; }
+
+            // Calculate total ticks in measure
+            int totalTicks = c.measureTotalTicks(startIdx, endIdx);
+            int rotateTicks = value % totalTicks; // Wrap rotation
+            if (rotateTicks <= 0) { inputMode = mc4::InputMode::Normal; break; }
+
+            // Find the split point: accumulate ticks from the start
+            int accumulated = 0;
+            int splitIdx = startIdx;
+            for (int i = startIdx; i < endIdx; ++i) {
+                accumulated += c.events()[i].step_time;
+                if (accumulated >= rotateTicks) {
+                    if (accumulated == rotateTicks) {
+                        // Clean split between events
+                        splitIdx = i + 1;
+                    } else {
+                        // Split falls mid-event — need to break the event in two
+                        int overshoot = accumulated - rotateTicks;
+                        int origST = c.events()[i].step_time;
+                        // First part: stays at position i
+                        c.events()[i].step_time = origST - overshoot;
+                        // Second part: insert after i
+                        mc4::Event second = c.events()[i];
+                        second.step_time = overshoot;
+                        second.pitch = -1; // Rest for the split remainder
+                        second.gate_time = 0;
+                        c.events().insert(c.events().begin() + i + 1, second);
+                        endIdx++; // List grew by 1
+                        splitIdx = i + 1;
+                    }
+                    break;
+                }
+            }
+
+            // Now rotate: move events [startIdx, splitIdx) to after events [splitIdx, endIdx)
+            if (splitIdx > startIdx && splitIdx < endIdx) {
+                // Remember if the measure had a measure_end flag
+                bool hadMeasureEnd = c.events()[endIdx - 1].measure_end;
+                std::vector<mc4::Event> head(c.events().begin() + startIdx,
+                                              c.events().begin() + splitIdx);
+                std::vector<mc4::Event> tail(c.events().begin() + splitIdx,
+                                              c.events().begin() + endIdx);
+                // Clear all measure_end flags in the rotated section
+                for (auto& e : head) e.measure_end = false;
+                for (auto& e : tail) e.measure_end = false;
+                // Reconstruct: tail then head
+                int idx = startIdx;
+                for (auto& e : tail) c.events()[idx++] = e;
+                for (auto& e : head) c.events()[idx++] = e;
+                // Restore measure_end on the last event
+                c.events()[endIdx - 1].measure_end = hadMeasureEnd;
             }
             inputMode = mc4::InputMode::Normal;
             break;
@@ -697,8 +773,8 @@ void SEQMC4Editor::commitValue(int value)
     pushUndo();
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
-    if (c.events.empty()) return;
-    auto& evt = c.events[c.cursorPos];
+    if (c.events().empty()) return;
+    auto& evt = c.events()[c.cursorPos];
 
     switch (c.fieldCursor) {
         case 0: evt.pitch = std::max(0, std::min(value, 127)); break;
@@ -716,7 +792,7 @@ void SEQMC4Editor::advanceCursor()
 {
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
-    if (c.cursorPos < (int)c.events.size() - 1)
+    if (c.cursorPos < (int)c.events().size() - 1)
         c.cursorPos++;
 }
 
@@ -725,7 +801,8 @@ void SEQMC4Editor::pushUndo()
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
     mc4::ChannelSnapshot snap;
-    snap.events = c.events;
+    snap.patterns = c.patterns;
+    snap.activePattern = c.activePattern;
     snap.cursorPos = c.cursorPos;
     snap.fieldCursor = c.fieldCursor;
     snap.activeLayer = c.activeLayer;
@@ -740,17 +817,17 @@ void SEQMC4Editor::performUndo()
     if (undoStack.empty()) return;
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
-    // Save current state to redo stack
     mc4::ChannelSnapshot redoSnap;
-    redoSnap.events = c.events;
+    redoSnap.patterns = c.patterns;
+    redoSnap.activePattern = c.activePattern;
     redoSnap.cursorPos = c.cursorPos;
     redoSnap.fieldCursor = c.fieldCursor;
     redoSnap.activeLayer = c.activeLayer;
     redoStack.push_back(redoSnap);
-    // Restore from undo stack
     auto snap = undoStack.back();
     undoStack.pop_back();
-    c.events = snap.events;
+    c.patterns = snap.patterns;
+    c.activePattern = snap.activePattern;
     c.cursorPos = snap.cursorPos;
     c.fieldCursor = snap.fieldCursor;
     c.activeLayer = snap.activeLayer;
@@ -762,17 +839,17 @@ void SEQMC4Editor::performRedo()
     if (redoStack.empty()) return;
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
-    // Save current state to undo stack
     mc4::ChannelSnapshot undoSnap;
-    undoSnap.events = c.events;
+    undoSnap.patterns = c.patterns;
+    undoSnap.activePattern = c.activePattern;
     undoSnap.cursorPos = c.cursorPos;
     undoSnap.fieldCursor = c.fieldCursor;
     undoSnap.activeLayer = c.activeLayer;
     undoStack.push_back(undoSnap);
-    // Restore from redo stack
     auto snap = redoStack.back();
     redoStack.pop_back();
-    c.events = snap.events;
+    c.patterns = snap.patterns;
+    c.activePattern = snap.activePattern;
     c.cursorPos = snap.cursorPos;
     c.fieldCursor = snap.fieldCursor;
     c.activeLayer = snap.activeLayer;
@@ -791,11 +868,11 @@ void SEQMC4Editor::insertEvent(bool before)
     def.gate_time = quarter;  // Legato by default — ready to play once pitch is set
     if (before) {
         // Insert BEFORE cursor (stays at same index, new event takes current position)
-        c.events.insert(c.events.begin() + c.cursorPos, def);
+        c.events().insert(c.events().begin() + c.cursorPos, def);
     } else {
         // Insert AFTER cursor and move to new event
         int insertPos = c.cursorPos + 1;
-        c.events.insert(c.events.begin() + insertPos, def);
+        c.events().insert(c.events().begin() + insertPos, def);
         c.cursorPos = insertPos;
     }
 }
@@ -805,10 +882,10 @@ void SEQMC4Editor::deleteEvent()
     pushUndo();
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
-    if (c.events.empty()) return;
-    c.events.erase(c.events.begin() + c.cursorPos);
-    if (c.events.empty()) {
-        c.events.push_back(mc4::Event{}); // Always keep at least one
+    if (c.events().empty()) return;
+    c.events().erase(c.events().begin() + c.cursorPos);
+    if (c.events().empty()) {
+        c.events().push_back(mc4::Event{}); // Always keep at least one
     }
     c.clampCursor();
 }
@@ -844,7 +921,7 @@ bool SEQMC4Editor::handleNavigationKey(const juce::KeyPress& key)
         return true;
     }
     if (keyCode == juce::KeyPress::downKey) {
-        if (c.cursorPos < (int)c.events.size() - 1) c.cursorPos++;
+        if (c.cursorPos < (int)c.events().size() - 1) c.cursorPos++;
         return true;
     }
     if (keyCode == juce::KeyPress::leftKey) {
@@ -876,7 +953,7 @@ bool SEQMC4Editor::handleNavigationKey(const juce::KeyPress& key)
         return true;
     }
     if (keyCode == juce::KeyPress::endKey) {
-        c.cursorPos = std::max(0, (int)c.events.size() - 1);
+        c.cursorPos = std::max(0, (int)c.events().size() - 1);
         return true;
     }
     return false;
@@ -936,7 +1013,7 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
     // R = mark repeat start
     if (keyCode == 'R' && !shift) {
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
-        ch().pendingRepeatStart = ch().cursorPos;
+        ch().pendingRepeatStart() = ch().cursorPos;
         return true;
     }
 
@@ -952,9 +1029,9 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         pushUndo();
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
         auto& c = ch();
-        if (c.cursorPos < (int)c.events.size() - 1) {
-            auto& a = c.events[c.cursorPos];
-            const auto& b = c.events[c.cursorPos + 1];
+        if (c.cursorPos < (int)c.events().size() - 1) {
+            auto& a = c.events()[c.cursorPos];
+            const auto& b = c.events()[c.cursorPos + 1];
             int newST = a.step_time + b.step_time;
             int newGT;
             if (a.gate_time >= a.step_time) {
@@ -965,7 +1042,7 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
             a.step_time = newST;
             a.gate_time = newGT;
             a.measure_end = a.measure_end || b.measure_end;
-            c.events.erase(c.events.begin() + c.cursorPos + 1);
+            c.events().erase(c.events().begin() + c.cursorPos + 1);
         }
         return true;
     }
@@ -975,8 +1052,8 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         pushUndo();
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
         auto& c = ch();
-        if (!c.events.empty())
-            c.events[c.cursorPos].accent = !c.events[c.cursorPos].accent;
+        if (!c.events().empty())
+            c.events()[c.cursorPos].accent = !c.events()[c.cursorPos].accent;
         return true;
     }
 
@@ -985,8 +1062,8 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         pushUndo();
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
         auto& c = ch();
-        if (!c.events.empty())
-            c.events[c.cursorPos].slide = !c.events[c.cursorPos].slide;
+        if (!c.events().empty())
+            c.events()[c.cursorPos].slide = !c.events()[c.cursorPos].slide;
         return true;
     }
 
@@ -995,8 +1072,8 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         pushUndo();
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
         auto& c = ch();
-        if (!c.events.empty())
-            c.events[c.cursorPos].measure_end = !c.events[c.cursorPos].measure_end;
+        if (!c.events().empty())
+            c.events()[c.cursorPos].measure_end = !c.events()[c.cursorPos].measure_end;
         return true;
     }
     // M = measure end toggle. If not set: commit input, set measure_end, advance.
@@ -1006,10 +1083,10 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         {
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
-            if (!c.events.empty()) {
-                if (c.events[c.cursorPos].measure_end) {
+            if (!c.events().empty()) {
+                if (c.events()[c.cursorPos].measure_end) {
                     // Already a measure end — toggle it off, don't advance
-                    c.events[c.cursorPos].measure_end = false;
+                    c.events()[c.cursorPos].measure_end = false;
                     return true;
                 }
                 // Not a measure end — commit any pending input, set it, advance
@@ -1017,7 +1094,7 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
                     commitValue(inputBuffer.getIntValue());
                     inputBuffer.clear();
                 }
-                c.events[c.cursorPos].measure_end = true;
+                c.events()[c.cursorPos].measure_end = true;
             }
         }
         advanceCursor();
@@ -1032,9 +1109,9 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         pushUndo();
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
         auto& c = ch();
-        if (c.events.empty() || c.cursorPos == 0) return true; // Need a previous event
-        auto& curr = c.events[c.cursorPos];
-        auto& prev = c.events[c.cursorPos - 1];
+        if (c.events().empty() || c.cursorPos == 0) return true; // Need a previous event
+        auto& curr = c.events()[c.cursorPos];
+        auto& prev = c.events()[c.cursorPos - 1];
         int step = shift ? 10 : 1;
         if (keyCode == '[') {
             // Move event later: increase curr ST, decrease prev ST
@@ -1054,13 +1131,13 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         return true;
     }
 
-    // . = rest (gate=0, advance)
-    if (keyCode == '.' || keyCode == juce::KeyPress::numberPadDecimalPoint) {
+    // . = rest (gate=0, advance) — but not Shift+. (next pattern)
+    if ((keyCode == '.' && !shift) || keyCode == juce::KeyPress::numberPadDecimalPoint) {
         {
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
-            if (!c.events.empty())
-                c.events[c.cursorPos].gate_time = 0;
+            if (!c.events().empty())
+                c.events()[c.cursorPos].gate_time = 0;
         }
         advanceCursor();
         return true;
@@ -1071,10 +1148,54 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         {
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
-            if (!c.events.empty())
-                c.events[c.cursorPos].gate_time = c.events[c.cursorPos].step_time;
+            if (!c.events().empty())
+                c.events()[c.cursorPos].gate_time = c.events()[c.cursorPos].step_time;
         }
         advanceCursor();
+        return true;
+    }
+
+    // O = rotate current measure by ST ticks
+    if (keyCode == 'O' && !shift) {
+        inputMode = mc4::InputMode::RotateMeasure;
+        inputBuffer.clear();
+        return true;
+    }
+
+    // P = commit current pattern: duplicate to a new pattern and switch editor to it
+    if (keyCode == 'P' && !shift) {
+        pushUndo();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        // Copy current pattern to a new one
+        mc4::Pattern newPat = c.patterns[c.activePattern];
+        c.patterns.push_back(newPat);
+        // Switch editor (and playback) to the new pattern
+        c.activePattern = (int)c.patterns.size() - 1;
+        c.cursorPos = 0;
+        return true;
+    }
+
+    // < (Shift+,) = previous pattern, > (Shift+.) = next pattern
+    // Seamless switch: keeps playback tick counter, just swaps which event list is read
+    if (keyCode == ',' && shift) {
+        pushUndo();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        if (c.activePattern > 0) {
+            c.activePattern--;
+            c.clampCursor();
+        }
+        return true;
+    }
+    if (keyCode == '.' && shift) {
+        pushUndo();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        if (c.activePattern < (int)c.patterns.size() - 1) {
+            c.activePattern++;
+            c.clampCursor();
+        }
         return true;
     }
 
@@ -1233,8 +1354,8 @@ bool SEQMC4Editor::handleNudgeKey(const juce::KeyPress& key)
     pushUndo();
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
-    if (c.events.empty()) return false;
-    auto& evt = c.events[c.cursorPos];
+    if (c.events().empty()) return false;
+    auto& evt = c.events()[c.cursorPos];
 
     switch (c.fieldCursor) {
         case 0: // Pitch: left/right = semitone, up/down = octave
