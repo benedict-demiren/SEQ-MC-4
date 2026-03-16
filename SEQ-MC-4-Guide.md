@@ -129,6 +129,8 @@ Patterns let you create variations of a sequence and switch between them seamles
 | Key | Action |
 |-----|--------|
 | P | Commit: duplicate current pattern to a new one and switch editor to it |
+| Cmd+P | New blank pattern (empty, single rest) |
+| Cmd+Backspace | Delete current pattern (switches to previous; can't delete last) |
 | Shift+P | Double pattern length (duplicate all events and append) |
 | < (Shift+,) | Switch to previous pattern |
 | > (Shift+.) | Switch to next pattern |
@@ -160,8 +162,8 @@ When active, incoming MIDI note-ons from your controller set the pitch and veloc
 |-----|--------|
 | C | Copy-overwrite (auto-detects current measure as start; prompts: end measure, reps, transpose) |
 | Shift+C | Copy-insert / ripple (same flow, auto-detects start measure) |
-| R | Mark repeat start at cursor |
-| Shift+R | Set repeat end at cursor (prompts for count) |
+| R | Toggle repeat start at cursor (press again to cancel pending start) |
+| Shift+R | Set repeat end at cursor (prompts for count), or remove repeat mark at cursor |
 
 ### Transport and configuration
 

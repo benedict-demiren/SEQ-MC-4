@@ -162,6 +162,40 @@ struct Channel {
         return (int)evts.size() - 1;
     }
 
+    // Update repeat mark indices after an insert at position insertIdx (count events inserted)
+    void adjustRepeatMarksForInsert(int insertIdx, int count = 1) {
+        for (auto& rm : repeatMarks()) {
+            if (rm.startEvent >= insertIdx) rm.startEvent += count;
+            if (rm.endEvent >= insertIdx) rm.endEvent += count;
+        }
+        if (pendingRepeatStart() >= insertIdx)
+            pendingRepeatStart() += count;
+    }
+
+    // Update repeat mark indices after a delete at position deleteIdx (count events removed)
+    // Returns false if any marks become invalid and were removed
+    void adjustRepeatMarksForDelete(int deleteIdx, int count = 1) {
+        int endDel = deleteIdx + count;
+        // Remove marks that are fully within the deleted range
+        for (int i = (int)repeatMarks().size() - 1; i >= 0; --i) {
+            auto& rm = repeatMarks()[i];
+            // If start or end falls within deleted range, remove the mark
+            if ((rm.startEvent >= deleteIdx && rm.startEvent < endDel) ||
+                (rm.endEvent >= deleteIdx && rm.endEvent < endDel)) {
+                repeatMarks().erase(repeatMarks().begin() + i);
+                continue;
+            }
+            // Shift indices down
+            if (rm.startEvent >= endDel) rm.startEvent -= count;
+            if (rm.endEvent >= endDel) rm.endEvent -= count;
+        }
+        // Clear pending if it was in the deleted range
+        if (pendingRepeatStart() >= deleteIdx && pendingRepeatStart() < endDel)
+            pendingRepeatStart() = -1;
+        else if (pendingRepeatStart() >= endDel)
+            pendingRepeatStart() -= count;
+    }
+
     // Total ticks in a measure range
     int measureTotalTicks(int startIdx, int endIdx) const {
         auto& evts = events();

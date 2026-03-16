@@ -481,7 +481,34 @@ bool SEQMC4Editor::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    // Channel selection: F1-F4 or Cmd+1-4 (laptop-friendly)
+    // Cmd+P = new blank pattern
+    if (key.getModifiers().isCommandDown() && keyCode == 'P') {
+        pushUndo();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        c.patterns.emplace_back(); // New blank pattern (single rest event)
+        c.activePattern = (int)c.patterns.size() - 1;
+        c.cursorPos = 0;
+        return true;
+    }
+
+    // Cmd+Backspace = delete current pattern (switch to previous, playback uninterrupted)
+    if (key.getModifiers().isCommandDown() && keyCode == juce::KeyPress::backspaceKey) {
+        {
+            std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+            if (ch().patterns.size() <= 1) return true; // Can't delete last pattern
+        }
+        pushUndo();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        c.patterns.erase(c.patterns.begin() + c.activePattern);
+        if (c.activePattern >= (int)c.patterns.size())
+            c.activePattern = (int)c.patterns.size() - 1;
+        c.clampCursor();
+        return true;
+    }
+
+    // Channel selection: F1-F4
     if (handleChannelSelection(key)) return true;
 
     // Layer selection: Shift+1-5
@@ -531,6 +558,7 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
             int count = std::max(1, std::min(value, 999));
+            c.adjustRepeatMarksForInsert(c.cursorPos, count);
             mc4::Event def;
             for (int i = 0; i < count; ++i)
                 c.events().insert(c.events().begin() + c.cursorPos, def);
@@ -542,6 +570,7 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
             int count = std::max(1, std::min(value, (int)c.events().size() - c.cursorPos));
+            c.adjustRepeatMarksForDelete(c.cursorPos, count);
             c.events().erase(c.events().begin() + c.cursorPos,
                            c.events().begin() + c.cursorPos + count);
             c.clampCursor();
@@ -919,10 +948,12 @@ void SEQMC4Editor::insertEvent(bool before)
     def.gate_time = quarter;  // Legato by default — ready to play once pitch is set
     if (before) {
         // Insert BEFORE cursor (stays at same index, new event takes current position)
+        c.adjustRepeatMarksForInsert(c.cursorPos);
         c.events().insert(c.events().begin() + c.cursorPos, def);
     } else {
         // Insert AFTER cursor and move to new event
         int insertPos = c.cursorPos + 1;
+        c.adjustRepeatMarksForInsert(insertPos);
         c.events().insert(c.events().begin() + insertPos, def);
         c.cursorPos = insertPos;
     }
@@ -934,6 +965,7 @@ void SEQMC4Editor::deleteEvent()
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
     if (c.events().empty()) return;
+    c.adjustRepeatMarksForDelete(c.cursorPos);
     c.events().erase(c.events().begin() + c.cursorPos);
     if (c.events().empty()) {
         mc4::Event rest;
@@ -1072,16 +1104,36 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         return true;
     }
 
-    // Shift+R = repeat end (set count)
+    // Shift+R = repeat end (set count), or clear repeat mark at cursor
     if (keyCode == 'R' && shift) {
-        inputMode = mc4::InputMode::RepeatEnd;
-        inputBuffer.clear();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        // Check if there's a committed repeat mark ending at cursor — if so, remove it
+        bool removed = false;
+        for (int i = (int)c.repeatMarks().size() - 1; i >= 0; --i) {
+            if (c.repeatMarks()[i].endEvent == c.cursorPos ||
+                c.repeatMarks()[i].startEvent == c.cursorPos) {
+                c.repeatMarks().erase(c.repeatMarks().begin() + i);
+                removed = true;
+            }
+        }
+        if (!removed) {
+            // No mark to remove — enter repeat count mode
+            inputMode = mc4::InputMode::RepeatEnd;
+            inputBuffer.clear();
+        }
         return true;
     }
-    // R = mark repeat start
+    // R = toggle repeat start at cursor
     if (keyCode == 'R' && !shift) {
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
-        ch().pendingRepeatStart() = ch().cursorPos;
+        auto& c = ch();
+        if (c.pendingRepeatStart() == c.cursorPos) {
+            // Already a pending start here — cancel it
+            c.pendingRepeatStart() = -1;
+        } else {
+            c.pendingRepeatStart() = c.cursorPos;
+        }
         return true;
     }
 
@@ -1459,7 +1511,7 @@ bool SEQMC4Editor::handleNudgeKey(const juce::KeyPress& key)
         case 0: // Pitch: left/right = semitone, up/down = octave
             if (delta == 10) delta = 12;
             if (delta == -10) delta = -12;
-            if (evt.pitch < 0) evt.pitch = 48; // If blank, start at C3
+            if (evt.pitch < 0) evt.pitch = (proc.config.defaultNote >= 0) ? proc.config.defaultNote : 48;
             evt.pitch = std::max(0, std::min(127, evt.pitch + delta));
             break;
         case 1: // Step time
