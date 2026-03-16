@@ -60,6 +60,34 @@ SEQMC4Editor::~SEQMC4Editor() {
 }
 
 void SEQMC4Editor::timerCallback() {
+    // Poll for incoming MIDI notes (step record)
+    if (proc.stepRecordEnabled.load()) {
+        int pitch, velocity;
+        while (proc.popMidiNote(pitch, velocity)) {
+            pushUndo();
+            std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+            auto& c = ch();
+            if (!c.events.empty()) {
+                auto& evt = c.events[c.cursorPos];
+                evt.pitch = pitch;
+                evt.velocity = velocity;
+                // If gate is 0 (rest), set it to step_time (legato) so it actually plays
+                if (evt.gate_time == 0)
+                    evt.gate_time = evt.step_time;
+                // Advance cursor
+                if (c.cursorPos < (int)c.events.size() - 1) {
+                    c.cursorPos++;
+                } else {
+                    // At end of list — auto-insert a new event
+                    mc4::Event def;
+                    def.pitch = -1;
+                    def.gate_time = def.step_time; // legato default
+                    c.events.push_back(def);
+                    c.cursorPos = (int)c.events.size() - 1;
+                }
+            }
+        }
+    }
     repaint();
 }
 
@@ -118,8 +146,14 @@ void SEQMC4Editor::drawStatusBar(juce::Graphics& g, int y)
     x += 55;
 
     // Mode
-    g.setColour(playing ? playColor : textColor);
-    g.drawText(playing ? "PLAY" : "EDIT", x, y, 45, kLineHeight, juce::Justification::left);
+    bool stepRec = proc.stepRecordEnabled.load();
+    if (stepRec) {
+        g.setColour(juce::Colour(0xffff6666)); // Red for record
+        g.drawText("REC", x, y, 45, kLineHeight, juce::Justification::left);
+    } else {
+        g.setColour(playing ? playColor : textColor);
+        g.drawText(playing ? "PLAY" : "EDIT", x, y, 45, kLineHeight, juce::Justification::left);
+    }
     x += 50;
 
     // Timebase
@@ -1146,6 +1180,13 @@ bool SEQMC4Editor::handleTransportKey(const juce::KeyPress& key)
     if (keyCode == 'V' && shift) {
         inputMode = mc4::InputMode::BaseVelocity;
         inputBuffer.clear();
+        return true;
+    }
+
+    // N = toggle step record mode (MIDI note input)
+    if (keyCode == 'N' && !shift) {
+        bool current = proc.stepRecordEnabled.load();
+        proc.stepRecordEnabled.store(!current);
         return true;
     }
 

@@ -43,6 +43,15 @@ void SEQMC4Processor::processBlock(juce::AudioBuffer<float>& buffer,
 
     isCurrentlyPlaying.store(playing);
 
+    // Capture incoming MIDI note-ons for step recording
+    if (stepRecordEnabled.load(std::memory_order_relaxed)) {
+        for (const auto metadata : midiMessages) {
+            auto msg = metadata.getMessage();
+            if (msg.isNoteOn())
+                pushMidiNote(msg.getNoteNumber(), msg.getVelocity());
+        }
+    }
+
     // Try to lock the sequence for reading
     midiMessages.clear();
 
