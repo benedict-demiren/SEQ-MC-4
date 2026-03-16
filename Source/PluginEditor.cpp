@@ -393,13 +393,13 @@ void SEQMC4Editor::drawShiftMap(juce::Graphics& g, int y)
 //==============================================================================
 int SEQMC4Editor::fieldColumnX(int field) const {
     // Pitch, StepTime, GateTime, Velocity, CV2, Accent, Slide, MPX
-    static const int offsets[] = { 130, 210, 290, 355, 410, 460, 500, 540 };
+    static const int offsets[] = { 130, 210, 290, 355, 410, 470, 500, 530 };
     if (field >= 0 && field < 8) return offsets[field];
     return 130;
 }
 
 int SEQMC4Editor::fieldWidth(int field) const {
-    static const int widths[] = { 70, 70, 55, 45, 40, 30, 30, 30 };
+    static const int widths[] = { 70, 70, 55, 45, 55, 25, 25, 25 };
     if (field >= 0 && field < 8) return widths[field];
     return 70;
 }
@@ -722,7 +722,7 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
             int repeatCount = std::max(2, std::min(value, 99));
-            if (c.pendingRepeatStart() >= 0 && c.cursorPos > c.pendingRepeatStart()) {
+            if (c.pendingRepeatStart() >= 0 && c.cursorPos >= c.pendingRepeatStart()) {
                 mc4::RepeatMark mark;
                 mark.startEvent = c.pendingRepeatStart();
                 mark.endEvent = c.cursorPos;
@@ -970,7 +970,7 @@ void SEQMC4Editor::deleteEvent()
     if (c.events().empty()) {
         mc4::Event rest;
         rest.pitch = -1;
-        rest.gate_time = 0;
+        rest.gate_time = std::max(1, seq().timebase / 4);
         c.events().push_back(rest); // Always keep at least one (as a rest)
     }
     c.clampCursor();
@@ -1209,7 +1209,7 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
             evt = mc4::Event{};
             evt.pitch = -1;
             evt.step_time = st;
-            evt.gate_time = 0;
+            evt.gate_time = std::max(1, seq().timebase / 4);
             evt.measure_end = me;
         }
         return true;
