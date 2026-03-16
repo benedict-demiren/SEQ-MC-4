@@ -60,14 +60,203 @@ juce::AudioProcessorEditor* SEQMC4Processor::createEditor()
     return new SEQMC4Editor(*this);
 }
 
-void SEQMC4Processor::getStateInformation(juce::MemoryBlock& /*destData*/)
+// ============================================================================
+// JSON Serialisation
+// ============================================================================
+
+static juce::var eventToVar(const mc4::Event& e)
 {
-    // Phase 4: JSON serialisation
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty("p", e.pitch);
+    obj->setProperty("st", e.step_time);
+    obj->setProperty("gt", e.gate_time);
+    obj->setProperty("vel", e.velocity);
+    obj->setProperty("cv2", e.cv2);
+    obj->setProperty("acc", e.accent);
+    obj->setProperty("sld", e.slide);
+    obj->setProperty("mend", e.measure_end);
+    obj->setProperty("mpx", e.mpx);
+    return juce::var(obj);
 }
 
-void SEQMC4Processor::setStateInformation(const void* /*data*/, int /*sizeInBytes*/)
+static mc4::Event varToEvent(const juce::var& v)
 {
-    // Phase 4: JSON deserialisation
+    mc4::Event e;
+    if (auto* obj = v.getDynamicObject()) {
+        e.pitch      = (int)obj->getProperty("p");
+        e.step_time  = (int)obj->getProperty("st");
+        e.gate_time  = (int)obj->getProperty("gt");
+        e.velocity   = (int)obj->getProperty("vel");
+        e.cv2        = (int)obj->getProperty("cv2");
+        e.accent     = (bool)obj->getProperty("acc");
+        e.slide      = (bool)obj->getProperty("sld");
+        e.measure_end = (bool)obj->getProperty("mend");
+        e.mpx        = (bool)obj->getProperty("mpx");
+    }
+    return e;
+}
+
+static juce::var repeatMarkToVar(const mc4::RepeatMark& rm)
+{
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty("start", rm.startEvent);
+    obj->setProperty("end", rm.endEvent);
+    obj->setProperty("count", rm.count);
+    return juce::var(obj);
+}
+
+static mc4::RepeatMark varToRepeatMark(const juce::var& v)
+{
+    mc4::RepeatMark rm;
+    if (auto* obj = v.getDynamicObject()) {
+        rm.startEvent = (int)obj->getProperty("start");
+        rm.endEvent   = (int)obj->getProperty("end");
+        rm.count      = (int)obj->getProperty("count");
+    }
+    return rm;
+}
+
+static juce::var channelToVar(const mc4::Channel& ch)
+{
+    auto* obj = new juce::DynamicObject();
+
+    juce::Array<juce::var> evts;
+    for (const auto& e : ch.events)
+        evts.add(eventToVar(e));
+    obj->setProperty("events", evts);
+
+    obj->setProperty("cursor", ch.cursorPos);
+    obj->setProperty("layer", ch.activeLayer);
+    obj->setProperty("field", ch.fieldCursor);
+
+    juce::Array<juce::var> rmarks;
+    for (const auto& rm : ch.repeatMarks)
+        rmarks.add(repeatMarkToVar(rm));
+    obj->setProperty("repeats", rmarks);
+
+    return juce::var(obj);
+}
+
+static void varToChannel(const juce::var& v, mc4::Channel& ch)
+{
+    if (auto* obj = v.getDynamicObject()) {
+        ch.events.clear();
+        if (auto* evts = obj->getProperty("events").getArray()) {
+            for (const auto& ev : *evts)
+                ch.events.push_back(varToEvent(ev));
+        }
+        // Ensure at least one event
+        if (ch.events.empty()) {
+            mc4::Event e;
+            e.pitch = -1;
+            e.gate_time = 30;
+            ch.events.push_back(e);
+        }
+
+        ch.cursorPos   = (int)obj->getProperty("cursor");
+        ch.activeLayer = (int)obj->getProperty("layer");
+        ch.fieldCursor = (int)obj->getProperty("field");
+
+        ch.repeatMarks.clear();
+        if (auto* rmarks = obj->getProperty("repeats").getArray()) {
+            for (const auto& rm : *rmarks)
+                ch.repeatMarks.push_back(varToRepeatMark(rm));
+        }
+
+        ch.clampCursor();
+    }
+}
+
+static juce::var configToVar(const mc4::Config& cfg)
+{
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty("cv2Mode", cfg.cv2OutputMode);
+    obj->setProperty("mpxCC", cfg.mpxOutputCC);
+    obj->setProperty("accentBoost", cfg.accentBoost);
+    obj->setProperty("baseVel", cfg.baseVelocity);
+    obj->setProperty("defaultNote", cfg.defaultNote);
+    obj->setProperty("portTime", cfg.portamentoTime);
+    obj->setProperty("portCurve", cfg.portamentoCurve);
+    obj->setProperty("pbRange", cfg.pitchBendRange);
+    obj->setProperty("noteDisplay", cfg.noteDisplayMode);
+    return juce::var(obj);
+}
+
+static void varToConfig(const juce::var& v, mc4::Config& cfg)
+{
+    if (auto* obj = v.getDynamicObject()) {
+        cfg.cv2OutputMode   = (int)obj->getProperty("cv2Mode");
+        cfg.mpxOutputCC     = (int)obj->getProperty("mpxCC");
+        cfg.accentBoost     = (int)obj->getProperty("accentBoost");
+        cfg.baseVelocity    = (int)obj->getProperty("baseVel");
+        cfg.defaultNote     = (int)obj->getProperty("defaultNote");
+        cfg.portamentoTime  = (int)obj->getProperty("portTime");
+        cfg.portamentoCurve = (int)obj->getProperty("portCurve");
+        cfg.pitchBendRange  = (int)obj->getProperty("pbRange");
+        cfg.noteDisplayMode = (int)obj->getProperty("noteDisplay");
+    }
+}
+
+void SEQMC4Processor::getStateInformation(juce::MemoryBlock& destData)
+{
+    std::lock_guard<std::mutex> lock(sequenceMutex);
+
+    auto* root = new juce::DynamicObject();
+    root->setProperty("version", 1); // Schema version for future compatibility
+
+    // Sequence
+    auto* seqObj = new juce::DynamicObject();
+    juce::Array<juce::var> chans;
+    for (int i = 0; i < 4; ++i)
+        chans.add(channelToVar(sequence.channels[i]));
+    seqObj->setProperty("channels", chans);
+    seqObj->setProperty("activeCh", sequence.activeChannel);
+    seqObj->setProperty("timebase", sequence.timebase);
+    seqObj->setProperty("tempo", sequence.tempo);
+    seqObj->setProperty("cycle", sequence.cycleOn);
+    root->setProperty("sequence", juce::var(seqObj));
+
+    // Config
+    root->setProperty("config", configToVar(config));
+
+    juce::String json = juce::JSON::toString(juce::var(root));
+    destData.replaceAll(json.toRawUTF8(), json.getNumBytesAsUTF8());
+}
+
+void SEQMC4Processor::setStateInformation(const void* data, int sizeInBytes)
+{
+    juce::String json(juce::CharPointer_UTF8(static_cast<const char*>(data)),
+                      (size_t)sizeInBytes);
+    auto root = juce::JSON::parse(json);
+
+    if (root.isVoid()) return; // Invalid JSON
+
+    std::lock_guard<std::mutex> lock(sequenceMutex);
+
+    // Check version
+    int version = (int)root.getProperty("version", 0);
+    if (version < 1) return; // Unknown format
+
+    // Sequence
+    auto seqVar = root.getProperty("sequence", {});
+    if (auto* seqObj = seqVar.getDynamicObject()) {
+        if (auto* chans = seqObj->getProperty("channels").getArray()) {
+            for (int i = 0; i < std::min(4, chans->size()); ++i)
+                varToChannel((*chans)[i], sequence.channels[i]);
+        }
+        sequence.activeChannel = std::max(0, std::min(3, (int)seqObj->getProperty("activeCh")));
+        sequence.timebase      = std::max(1, (int)seqObj->getProperty("timebase"));
+        sequence.tempo         = std::max(20, std::min(300, (int)seqObj->getProperty("tempo")));
+        sequence.cycleOn       = (bool)seqObj->getProperty("cycle");
+    }
+
+    // Config
+    auto cfgVar = root.getProperty("config", {});
+    if (!cfgVar.isVoid())
+        varToConfig(cfgVar, config);
+
+    // Reset playback engine so it doesn't try to play from stale positions
+    engine.reset();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
