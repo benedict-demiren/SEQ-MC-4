@@ -67,7 +67,7 @@ private:
 
     // Edit operations
     void commitValue(int value);
-    void insertEvent();
+    void insertEvent(bool before = false);
     void deleteEvent();
     void advanceCursor();
     void pushUndo();       // Save current state to undo stack

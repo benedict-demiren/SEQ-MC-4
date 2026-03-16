@@ -602,6 +602,7 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
         case mc4::InputMode::CopyReps: {
             copyState.repetitions = std::max(1, std::min(value, 99));
             inputMode = mc4::InputMode::CopyTranspose;
+            inputBuffer = "0"; // Pre-populate with 0 (most common case: no transpose)
             break;
         }
 
@@ -778,18 +779,25 @@ void SEQMC4Editor::performRedo()
     c.clampCursor();
 }
 
-void SEQMC4Editor::insertEvent()
+void SEQMC4Editor::insertEvent(bool before)
 {
     pushUndo();
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
     mc4::Event def;
     def.pitch = proc.config.defaultNote;  // Uses configured default (-1 = blank/unset)
-    // Gate defaults to step_time (legato) — ready to play once pitch is set
-    // Insert AFTER current event and move cursor to the new event
-    int insertPos = c.cursorPos + 1;
-    c.events.insert(c.events.begin() + insertPos, def);
-    c.cursorPos = insertPos;
+    int quarter = std::max(1, seq().timebase / 4);  // Quarter of timebase (e.g. 30 at TB=120)
+    def.step_time = quarter;
+    def.gate_time = quarter;  // Legato by default — ready to play once pitch is set
+    if (before) {
+        // Insert BEFORE cursor (stays at same index, new event takes current position)
+        c.events.insert(c.events.begin() + c.cursorPos, def);
+    } else {
+        // Insert AFTER cursor and move to new event
+        int insertPos = c.cursorPos + 1;
+        c.events.insert(c.events.begin() + insertPos, def);
+        c.cursorPos = insertPos;
+    }
 }
 
 void SEQMC4Editor::deleteEvent()
@@ -879,15 +887,14 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
     int keyCode = key.getKeyCode();
     bool shift = key.getModifiers().isShiftDown();
 
-    // Shift+I = insert multiple
+    // Shift+I = insert before cursor
     if (keyCode == 'I' && shift) {
-        inputMode = mc4::InputMode::InsertMulti;
-        inputBuffer.clear();
+        insertEvent(true);
         return true;
     }
-    // I = insert single
+    // I = insert after cursor
     if (keyCode == 'I' && !shift) {
-        insertEvent();
+        insertEvent(false);
         return true;
     }
 
@@ -1113,13 +1120,15 @@ bool SEQMC4Editor::handleChannelSelection(const juce::KeyPress& key)
         return true;
     }
 
-    // Ctrl+1-4 (laptop-friendly alternative — Ctrl avoids DAW shortcut conflicts)
-    if (key.getModifiers().isCtrlDown()) {
+    // Alt/Option+1-4 (laptop-friendly alternative)
+    // On macOS, Option+number produces special chars: 1=¡(0xA1), 2=™(0x2122), 3=£(0xA3), 4=¢(0xA2)
+    // Match both raw digits (if JUCE passes them) and the special chars
+    if (key.getModifiers().isAltDown()) {
         int chan = -1;
-        if (keyCode == '1') chan = 0;
-        else if (keyCode == '2') chan = 1;
-        else if (keyCode == '3') chan = 2;
-        else if (keyCode == '4') chan = 3;
+        if (keyCode == '1' || keyCode == 0xA1)   chan = 0;
+        else if (keyCode == '2' || keyCode == 0x2122) chan = 1;
+        else if (keyCode == '3' || keyCode == 0xA3)   chan = 2;
+        else if (keyCode == '4' || keyCode == 0xA2)   chan = 3;
         if (chan >= 0) {
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             seq().activeChannel = chan;
