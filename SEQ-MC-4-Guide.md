@@ -100,7 +100,6 @@ CV1  ST  GT  VEL  CV2  MPX
 | Key | Action |
 |-----|--------|
 | F1–F4 | Select channel 1–4 |
-| Option+1–4 | Select channel 1–4 (laptop-friendly, avoids DAW/system conflicts) |
 
 ### Editing
 
@@ -114,11 +113,14 @@ CV1  ST  GT  VEL  CV2  MPX
 | J | Join current event with next (merge timing) |
 | A | Toggle accent flag |
 | S | Toggle slide flag |
+| X | Toggle MPX flag (secondary gate — on the MC-4 this triggered a second CV/gate output) |
+| Shift+X | Clear event (reset to rest, preserving step time and measure boundaries) |
 | M | Toggle measure end (sets + advances if unset; clears if already set) |
 | Shift+M | Toggle measure end (always toggles, never advances) |
 | T | Tie: set GT = ST, then advance |
 | . (period) | Rest: set GT = 0, then advance |
-| O | Rotate current measure by N ticks (prompts for ST offset) |
+| O | Rotate current measure by N ticks (prompts for ST offset; supports negative values for backward rotation) |
+| Shift+O | Rotate only notes in current measure (preserves groove/rests, shifts pitches/velocities) |
 
 ### Patterns
 
@@ -127,8 +129,9 @@ Patterns let you create variations of a sequence and switch between them seamles
 | Key | Action |
 |-----|--------|
 | P | Commit: duplicate current pattern to a new one and switch editor to it |
-| Shift+, (<) | Switch to previous pattern |
-| Shift+. (>) | Switch to next pattern |
+| Shift+P | Double pattern length (duplicate all events and append) |
+| < (Shift+,) | Switch to previous pattern |
+| > (Shift+.) | Switch to next pattern |
 
 When multiple patterns exist, the status bar shows `P:N/M` (e.g. `P:2/3` = editing pattern 2 of 3). Pattern switching during playback is legato — the engine continues from the exact tick position, just reading from the new pattern's event list.
 
@@ -155,8 +158,8 @@ When active, incoming MIDI note-ons from your controller set the pitch and veloc
 
 | Key | Action |
 |-----|--------|
-| C | Copy-overwrite (prompts: start measure, end measure, reps, transpose — transpose defaults to 0) |
-| Shift+C | Copy-insert / ripple (same prompts) |
+| C | Copy-overwrite (auto-detects current measure as start; prompts: end measure, reps, transpose) |
+| Shift+C | Copy-insert / ripple (same flow, auto-detects start measure) |
 | R | Mark repeat start at cursor |
 | Shift+R | Set repeat end at cursor (prompts for count) |
 

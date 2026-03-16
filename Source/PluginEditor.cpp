@@ -29,6 +29,7 @@ static const char* inputModeName(mc4::InputMode mode) {
         case mc4::InputMode::DefaultNote:   return "DEFAULT NOTE: ";
         case mc4::InputMode::BaseVelocity:  return "BASE VELOCITY: ";
         case mc4::InputMode::RotateMeasure: return "ROTATE BY ST: ";
+        case mc4::InputMode::RotateNotesOnly: return "ROTATE NOTES BY: ";
         default: return "> ";
     }
 }
@@ -182,7 +183,7 @@ void SEQMC4Editor::drawStatusBar(juce::Graphics& g, int y)
 
     // Event count
     g.setColour(dimColor);
-    g.drawText(juce::String(thisCh.events().size()) + "ev", x, y, 50, kLineHeight, juce::Justification::left);
+    g.drawText(juce::String(thisCh.events().size()), x, y, 50, kLineHeight, juce::Justification::left);
 }
 
 void SEQMC4Editor::drawCurrentEvent(juce::Graphics& g, int y)
@@ -448,6 +449,16 @@ bool SEQMC4Editor::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
+    // Minus key for negative values in rotation and transpose modes
+    if ((keyCode == '-' || keyCode == juce::KeyPress::numberPadSubtract) &&
+        (inputMode == mc4::InputMode::RotateMeasure ||
+         inputMode == mc4::InputMode::RotateNotesOnly ||
+         inputMode == mc4::InputMode::CopyTranspose) &&
+        inputBuffer.isEmpty()) {
+        inputBuffer = "-";
+        return true;
+    }
+
     // Digit keys (main keyboard and numpad) — but NOT when Shift is held (those are layer shortcuts)
     if (keyCode >= '0' && keyCode <= '9' && !key.getModifiers().isShiftDown())
         return handleDigitKey(keyCode - '0');
@@ -617,12 +628,8 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
         }
 
         case mc4::InputMode::CopyTranspose: {
-            // Transpose can be negative — interpret values > 63 as negative
-            // (e.g., type 127 = -1, 126 = -2, etc.) or just use raw value as semitones up
-            // For simplicity: values 0-63 = up, 64-127 = down (128-value)
-            int transpose = value;
-            if (transpose > 63) transpose = transpose - 128;
-            copyState.transpose = transpose;
+            // Transpose: use raw value directly (supports negative via '-' key)
+            copyState.transpose = std::max(-127, std::min(127, value));
 
             // Execute the copy
             {
@@ -698,8 +705,12 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
             break;
         }
 
+        // Rotate notes only — shares code with RotateMeasure
+        case mc4::InputMode::RotateNotesOnly:
         // Rotate measure: circular shift events in current measure by ST ticks
+        // Positive values rotate forward (upward), negative rotate backward (downward)
         case mc4::InputMode::RotateMeasure: {
+            bool notesOnly = (inputMode == mc4::InputMode::RotateNotesOnly);
             std::lock_guard<std::mutex> lock(proc.sequenceMutex);
             auto& c = ch();
             int measure, step;
@@ -709,56 +720,96 @@ bool SEQMC4Editor::handleEnterKey(bool shouldAdvance)
             int numEvents = endIdx - startIdx;
             if (numEvents < 2) { inputMode = mc4::InputMode::Normal; break; }
 
+            int rawTicks = value;
+
             // Calculate total ticks in measure
             int totalTicks = c.measureTotalTicks(startIdx, endIdx);
-            int rotateTicks = value % totalTicks; // Wrap rotation
-            if (rotateTicks <= 0) { inputMode = mc4::InputMode::Normal; break; }
+            if (totalTicks <= 0) { inputMode = mc4::InputMode::Normal; break; }
 
-            // Find the split point: accumulate ticks from the start
-            int accumulated = 0;
-            int splitIdx = startIdx;
-            for (int i = startIdx; i < endIdx; ++i) {
-                accumulated += c.events()[i].step_time;
-                if (accumulated >= rotateTicks) {
-                    if (accumulated == rotateTicks) {
-                        // Clean split between events
-                        splitIdx = i + 1;
-                    } else {
-                        // Split falls mid-event — need to break the event in two
-                        int overshoot = accumulated - rotateTicks;
-                        int origST = c.events()[i].step_time;
-                        // First part: stays at position i
-                        c.events()[i].step_time = origST - overshoot;
-                        // Second part: insert after i
-                        mc4::Event second = c.events()[i];
-                        second.step_time = overshoot;
-                        second.pitch = -1; // Rest for the split remainder
-                        second.gate_time = 0;
-                        c.events().insert(c.events().begin() + i + 1, second);
-                        endIdx++; // List grew by 1
-                        splitIdx = i + 1;
+            // Handle negative rotation: convert to equivalent forward rotation
+            int rotateTicks = ((rawTicks % totalTicks) + totalTicks) % totalTicks;
+            if (rotateTicks == 0) { inputMode = mc4::InputMode::Normal; break; }
+
+            if (notesOnly) {
+                // Notes-only rotation: shift pitches/velocities while preserving
+                // the rhythmic structure (step times, gate times, rests, measure_end)
+                // Collect only the "note" events (pitch >= 0, gate > 0) in order
+                struct NoteData { int pitch; int velocity; bool accent; bool slide; };
+                std::vector<NoteData> notes;
+                std::vector<int> notePositions; // indices within measure
+                for (int i = startIdx; i < endIdx; ++i) {
+                    if (c.events()[i].pitch >= 0 && c.events()[i].gate_time > 0) {
+                        notes.push_back({c.events()[i].pitch, c.events()[i].velocity,
+                                         c.events()[i].accent, c.events()[i].slide});
+                        notePositions.push_back(i);
                     }
-                    break;
                 }
-            }
+                if (notes.size() < 2) { inputMode = mc4::InputMode::Normal; break; }
 
-            // Now rotate: move events [startIdx, splitIdx) to after events [splitIdx, endIdx)
-            if (splitIdx > startIdx && splitIdx < endIdx) {
-                // Remember if the measure had a measure_end flag
-                bool hadMeasureEnd = c.events()[endIdx - 1].measure_end;
-                std::vector<mc4::Event> head(c.events().begin() + startIdx,
-                                              c.events().begin() + splitIdx);
-                std::vector<mc4::Event> tail(c.events().begin() + splitIdx,
-                                              c.events().begin() + endIdx);
-                // Clear all measure_end flags in the rotated section
-                for (auto& e : head) e.measure_end = false;
-                for (auto& e : tail) e.measure_end = false;
-                // Reconstruct: tail then head
-                int idx = startIdx;
-                for (auto& e : tail) c.events()[idx++] = e;
-                for (auto& e : head) c.events()[idx++] = e;
-                // Restore measure_end on the last event
-                c.events()[endIdx - 1].measure_end = hadMeasureEnd;
+                // Compute rotation in terms of note positions
+                // rotateTicks / average-ST gives approximate note offset
+                // For simplicity: rotate by 1 note per (totalTicks/numNotes) ticks
+                int notesPerMeasure = (int)notes.size();
+                int avgTicksPerNote = totalTicks / notesPerMeasure;
+                int noteRotation = (avgTicksPerNote > 0) ? (rotateTicks / avgTicksPerNote) : 1;
+                if (noteRotation < 1) noteRotation = 1;
+                noteRotation = noteRotation % notesPerMeasure;
+
+                // Rotate the note data array
+                std::vector<NoteData> rotated(notesPerMeasure);
+                for (int i = 0; i < notesPerMeasure; ++i)
+                    rotated[i] = notes[(i + noteRotation) % notesPerMeasure];
+
+                // Write back to original positions
+                for (int i = 0; i < notesPerMeasure; ++i) {
+                    int idx = notePositions[i];
+                    c.events()[idx].pitch = rotated[i].pitch;
+                    c.events()[idx].velocity = rotated[i].velocity;
+                    c.events()[idx].accent = rotated[i].accent;
+                    c.events()[idx].slide = rotated[i].slide;
+                }
+            } else {
+                // Full rotation: circular shift all events by tick offset
+                // Find the split point: accumulate ticks from the start
+                int accumulated = 0;
+                int splitIdx = startIdx;
+                for (int i = startIdx; i < endIdx; ++i) {
+                    accumulated += c.events()[i].step_time;
+                    if (accumulated >= rotateTicks) {
+                        if (accumulated == rotateTicks) {
+                            // Clean split between events
+                            splitIdx = i + 1;
+                        } else {
+                            // Split falls mid-event — need to break the event in two
+                            int overshoot = accumulated - rotateTicks;
+                            int origST = c.events()[i].step_time;
+                            c.events()[i].step_time = origST - overshoot;
+                            mc4::Event second = c.events()[i];
+                            second.step_time = overshoot;
+                            second.pitch = -1;
+                            second.gate_time = 0;
+                            c.events().insert(c.events().begin() + i + 1, second);
+                            endIdx++;
+                            splitIdx = i + 1;
+                        }
+                        break;
+                    }
+                }
+
+                // Now rotate: move events [startIdx, splitIdx) to after events [splitIdx, endIdx)
+                if (splitIdx > startIdx && splitIdx < endIdx) {
+                    bool hadMeasureEnd = c.events()[endIdx - 1].measure_end;
+                    std::vector<mc4::Event> head(c.events().begin() + startIdx,
+                                                  c.events().begin() + splitIdx);
+                    std::vector<mc4::Event> tail(c.events().begin() + splitIdx,
+                                                  c.events().begin() + endIdx);
+                    for (auto& e : head) e.measure_end = false;
+                    for (auto& e : tail) e.measure_end = false;
+                    int idx = startIdx;
+                    for (auto& e : tail) c.events()[idx++] = e;
+                    for (auto& e : head) c.events()[idx++] = e;
+                    c.events()[endIdx - 1].measure_end = hadMeasureEnd;
+                }
             }
             inputMode = mc4::InputMode::Normal;
             break;
@@ -885,7 +936,10 @@ void SEQMC4Editor::deleteEvent()
     if (c.events().empty()) return;
     c.events().erase(c.events().begin() + c.cursorPos);
     if (c.events().empty()) {
-        c.events().push_back(mc4::Event{}); // Always keep at least one
+        mc4::Event rest;
+        rest.pitch = -1;
+        rest.gate_time = 0;
+        c.events().push_back(rest); // Always keep at least one (as a rest)
     }
     c.clampCursor();
 }
@@ -991,16 +1045,30 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
     if (keyCode == 'C' && shift) {
         copyState = mc4::CopyState{};
         copyState.insertMode = true;
-        inputMode = mc4::InputMode::CopyStartMeas;
-        inputBuffer.clear();
+        // Auto-detect current measure as start measure
+        {
+            std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+            int measure, step;
+            ch().getMeasureInfo(ch().cursorPos, measure, step);
+            copyState.startMeasure = measure;
+        }
+        inputMode = mc4::InputMode::CopyEndMeas;
+        inputBuffer = juce::String(copyState.startMeasure); // Pre-populate end = start
         return true;
     }
     // C = copy (overwrite)
     if (keyCode == 'C' && !shift) {
         copyState = mc4::CopyState{};
         copyState.insertMode = false;
-        inputMode = mc4::InputMode::CopyStartMeas;
-        inputBuffer.clear();
+        // Auto-detect current measure as start measure
+        {
+            std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+            int measure, step;
+            ch().getMeasureInfo(ch().cursorPos, measure, step);
+            copyState.startMeasure = measure;
+        }
+        inputMode = mc4::InputMode::CopyEndMeas;
+        inputBuffer = juce::String(copyState.startMeasure); // Pre-populate end = start
         return true;
     }
 
@@ -1064,6 +1132,34 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         auto& c = ch();
         if (!c.events().empty())
             c.events()[c.cursorPos].slide = !c.events()[c.cursorPos].slide;
+        return true;
+    }
+
+    // X = toggle MPX flag
+    if (keyCode == 'X' && !shift) {
+        pushUndo();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        if (!c.events().empty())
+            c.events()[c.cursorPos].mpx = !c.events()[c.cursorPos].mpx;
+        return true;
+    }
+
+    // Shift+X = clear event (reset to rest, preserving step time and measure_end)
+    if (keyCode == 'X' && shift) {
+        pushUndo();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        if (!c.events().empty()) {
+            auto& evt = c.events()[c.cursorPos];
+            int st = evt.step_time;
+            bool me = evt.measure_end;
+            evt = mc4::Event{};
+            evt.pitch = -1;
+            evt.step_time = st;
+            evt.gate_time = 0;
+            evt.measure_end = me;
+        }
         return true;
     }
 
@@ -1155,10 +1251,29 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         return true;
     }
 
-    // O = rotate current measure by ST ticks
-    if (keyCode == 'O' && !shift) {
-        inputMode = mc4::InputMode::RotateMeasure;
+    // O = rotate current measure by ST ticks (full rotation)
+    // Shift+O = rotate only notes in current measure (preserve groove/rests)
+    if (keyCode == 'O') {
+        inputMode = shift ? mc4::InputMode::RotateNotesOnly : mc4::InputMode::RotateMeasure;
         inputBuffer.clear();
+        return true;
+    }
+
+    // Shift+P = double pattern length (duplicate all events and append)
+    if (keyCode == 'P' && shift) {
+        pushUndo();
+        std::lock_guard<std::mutex> lock(proc.sequenceMutex);
+        auto& c = ch();
+        auto& evts = c.events();
+        if (!evts.empty()) {
+            // Copy all events
+            std::vector<mc4::Event> copy(evts.begin(), evts.end());
+            // Clear measure_end on last event of first half so it flows into the copy
+            if (!evts.empty())
+                evts.back().measure_end = false;
+            // Append
+            evts.insert(evts.end(), copy.begin(), copy.end());
+        }
         return true;
     }
 
@@ -1178,7 +1293,8 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
 
     // < (Shift+,) = previous pattern, > (Shift+.) = next pattern
     // Seamless switch: keeps playback tick counter, just swaps which event list is read
-    if (keyCode == ',' && shift) {
+    // On macOS, Shift+, produces '<' (0x3C) and Shift+. produces '>' (0x3E)
+    if ((keyCode == ',' && shift) || keyCode == '<') {
         pushUndo();
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
         auto& c = ch();
@@ -1188,7 +1304,7 @@ bool SEQMC4Editor::handleEditCommand(const juce::KeyPress& key)
         }
         return true;
     }
-    if (keyCode == '.' && shift) {
+    if ((keyCode == '.' && shift) || keyCode == '>') {
         pushUndo();
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
         auto& c = ch();
@@ -1232,31 +1348,13 @@ bool SEQMC4Editor::handleChannelSelection(const juce::KeyPress& key)
 {
     int keyCode = key.getKeyCode();
 
-    // F1-F4 (desktop keyboards)
+    // F1-F4 for channel selection
     if (keyCode >= juce::KeyPress::F1Key && keyCode <= juce::KeyPress::F4Key) {
         std::lock_guard<std::mutex> lock(proc.sequenceMutex);
         seq().activeChannel = keyCode - juce::KeyPress::F1Key;
         undoStack.clear(); // Channel switch resets undo context
         redoStack.clear();
         return true;
-    }
-
-    // Alt/Option+1-4 (laptop-friendly alternative)
-    // On macOS, Option+number produces special chars: 1=¡(0xA1), 2=™(0x2122), 3=£(0xA3), 4=¢(0xA2)
-    // Match both raw digits (if JUCE passes them) and the special chars
-    if (key.getModifiers().isAltDown()) {
-        int chan = -1;
-        if (keyCode == '1' || keyCode == 0xA1)   chan = 0;
-        else if (keyCode == '2' || keyCode == 0x2122) chan = 1;
-        else if (keyCode == '3' || keyCode == 0xA3)   chan = 2;
-        else if (keyCode == '4' || keyCode == 0xA2)   chan = 3;
-        if (chan >= 0) {
-            std::lock_guard<std::mutex> lock(proc.sequenceMutex);
-            seq().activeChannel = chan;
-            undoStack.clear();
-            redoStack.clear();
-            return true;
-        }
     }
 
     return false;

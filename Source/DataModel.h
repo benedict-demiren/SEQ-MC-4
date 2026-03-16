@@ -29,7 +29,8 @@ enum class InputMode {
     RepeatEnd,      // Repeat end: waiting for repeat count
     DefaultNote,    // Setting default note for new events
     BaseVelocity,   // Setting base velocity
-    RotateMeasure   // Rotate current measure by ST ticks
+    RotateMeasure,   // Rotate current measure by ST ticks (full)
+    RotateNotesOnly  // Rotate only notes in current measure (preserve groove)
 };
 
 // State for multi-step copy command
