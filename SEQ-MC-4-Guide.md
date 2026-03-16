@@ -31,6 +31,9 @@ Three-tier system:
 ### Initial state
 Each channel starts with a single blank event (pitch unset, GT = ST = 30). You build from there — insert events with `I`, set pitches, adjust timing.
 
+### State persistence
+All sequence data, config, and transport state are serialised to JSON via JUCE's `getStateInformation`/`setStateInformation`. Sessions survive save/close/reopen in any host. Schema is versioned for future compatibility.
+
 ## Display layout
 
 ```
@@ -46,7 +49,7 @@ M:001 S:01
 CV1  ST  GT  VEL  CV2  MPX
 ```
 
-- **Status bar:** Channel, active layer, play/edit mode, timebase, tempo, cycle state, event count.
+- **Status bar:** Channel, active layer, play/edit/REC mode, timebase, tempo, cycle state, event count.
 - **Detail view:** Current event with all fields. Active field highlighted; typed values preview in yellow.
 - **Context view:** Scrolling list centred on cursor. Columns: index, pitch, ST, GT, velocity, CV2, flags.
 - **Input line:** Current typing buffer and active field name.
@@ -127,6 +130,14 @@ Shift the boundary between current event and previous event. Total sequence leng
 | Shift+[ | Same, ±10 ticks |
 | Shift+] | Same, ±10 ticks |
 
+### MIDI step recording
+
+| Key | Action |
+|-----|--------|
+| N | Toggle step record mode (status bar shows REC in red) |
+
+When active, incoming MIDI note-ons from your controller set the pitch and velocity of the current event and advance the cursor automatically. If gate time is 0 (rest), it's promoted to legato (GT = ST) so the note plays. At the end of the event list, new events are auto-inserted. Uses a lock-free ring buffer from the audio thread — no glitches.
+
 ### Copy and repeat
 
 | Key | Action |
@@ -142,6 +153,7 @@ Shift the boundary between current event and previous event. Total sequence leng
 |-----|--------|
 | Space | Play/stop (standalone only; passes through to host in plugin mode) |
 | Tab | Toggle cycle (loop) on/off |
+| N | Toggle MIDI step record mode |
 | Shift+T | Set tempo (prompts for BPM) |
 | Shift+B | Set timebase (prompts for ticks per beat) |
 | Shift+S / Ctrl+S | Sync tempo to host BPM |
@@ -171,13 +183,13 @@ Shift the boundary between current event and previous event. Total sequence leng
 ## Architecture
 
 - **DataModel.h** — All data structures: Event, Channel, Sequence, Config, enums.
-- **PluginProcessor.cpp** — JUCE audio processor. Owns Sequence, Config, PlaybackEngine. Reads host transport. Audio thread uses `try_lock` on mutex.
-- **PluginEditor.cpp** — All UI rendering and keyboard handling. Locks mutex for edits. 30fps repaint timer.
+- **PluginProcessor.cpp** — JUCE audio processor. Owns Sequence, Config, PlaybackEngine. Reads host transport. JSON state save/load. MIDI input capture for step recording via lock-free ring buffer. Audio thread uses `try_lock` on mutex.
+- **PluginEditor.cpp** — All UI rendering and keyboard handling. Locks mutex for edits. 30fps repaint timer. Polls MIDI ring buffer for step record input.
 - **PlaybackEngine.cpp** — Tick-based per-channel sequencer. Fires MIDI note-on/off based on ST/GT boundaries. Handles repeat marks with iteration stack.
 - **CMakeLists.txt** — Builds VST3, AU, CLAP, Standalone. IS_MIDI_EFFECT = TRUE.
 
 ### Thread model
-UI thread locks `sequenceMutex` for all edits. Audio thread calls `try_lock` — if it can't acquire, it skips that buffer (no blocking, no glitches). Undo/redo uses full channel snapshots.
+UI thread locks `sequenceMutex` for all edits. Audio thread calls `try_lock` — if it can't acquire, it skips that buffer (no blocking, no glitches). MIDI step record uses a lock-free SPSC ring buffer (audio thread writes, UI thread reads at 30fps). Undo/redo uses full channel snapshots.
 
 ## Current status
 
@@ -194,11 +206,13 @@ UI thread locks `sequenceMutex` for all edits. Audio thread calls `try_lock` —
 - Host tempo sync
 - Cycle (loop) mode
 - Configurable default note and base velocity
+- JSON state save/load (full session persistence)
+- MIDI step recording from external controller
 
 **Not yet implemented:**
-- State save/load (JSON serialisation)
+- MIDI file export/import
 - Microscope function (zoom into selection with finer timebase)
 - Tables (M8-style automation)
-- MIDI input (record from keyboard)
+- Real-time MIDI recording (quantised to timebase while transport runs)
 - MPE expression output beyond note-on velocity
 - Pattern chaining across channels
