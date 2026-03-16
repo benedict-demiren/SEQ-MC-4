@@ -100,14 +100,14 @@ CV1  ST  GT  VEL  CV2  MPX
 | Key | Action |
 |-----|--------|
 | F1–F4 | Select channel 1–4 |
-| Ctrl+1–4 | Select channel 1–4 (laptop-friendly) |
+| Option+1–4 | Select channel 1–4 (laptop-friendly, avoids DAW/system conflicts) |
 
 ### Editing
 
 | Key | Action |
 |-----|--------|
-| I | Insert new event after cursor (blank pitch, default GT) |
-| Shift+I | Insert multiple (prompts for count) |
+| I | Insert new event after cursor (ST and GT default to timebase/4) |
+| Shift+I | Insert new event before cursor (for adding before first event) |
 | D | Delete event at cursor |
 | Shift+D | Delete multiple (prompts for count) |
 | V | Divide event into N equal parts |
@@ -142,7 +142,7 @@ When active, incoming MIDI note-ons from your controller set the pitch and veloc
 
 | Key | Action |
 |-----|--------|
-| C | Copy-overwrite (prompts: start measure, end measure, reps, transpose) |
+| C | Copy-overwrite (prompts: start measure, end measure, reps, transpose — transpose defaults to 0) |
 | Shift+C | Copy-insert / ripple (same prompts) |
 | R | Mark repeat start at cursor |
 | Shift+R | Set repeat end at cursor (prompts for count) |
