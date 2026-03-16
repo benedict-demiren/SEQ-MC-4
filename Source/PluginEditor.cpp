@@ -442,8 +442,8 @@ bool SEQMC4Editor::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    // Backspace deletes last digit
-    if (keyCode == juce::KeyPress::backspaceKey) {
+    // Backspace deletes last digit (but not Cmd+Backspace — that's delete pattern)
+    if (keyCode == juce::KeyPress::backspaceKey && !key.getModifiers().isCommandDown()) {
         if (inputBuffer.isNotEmpty())
             inputBuffer = inputBuffer.dropLastCharacters(1);
         return true;
@@ -942,7 +942,7 @@ void SEQMC4Editor::insertEvent(bool before)
     std::lock_guard<std::mutex> lock(proc.sequenceMutex);
     auto& c = ch();
     mc4::Event def;
-    def.pitch = proc.config.defaultNote;  // Uses configured default (-1 = blank/unset)
+    def.pitch = -1;  // Always insert as rest; default note only applies via nudge
     int quarter = std::max(1, seq().timebase / 4);  // Quarter of timebase (e.g. 30 at TB=120)
     def.step_time = quarter;
     def.gate_time = quarter;  // Legato by default — ready to play once pitch is set
