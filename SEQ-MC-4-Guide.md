@@ -118,6 +118,19 @@ CV1  ST  GT  VEL  CV2  MPX
 | Shift+M | Toggle measure end (always toggles, never advances) |
 | T | Tie: set GT = ST, then advance |
 | . (period) | Rest: set GT = 0, then advance |
+| O | Rotate current measure by N ticks (prompts for ST offset) |
+
+### Patterns
+
+Patterns let you create variations of a sequence and switch between them seamlessly during playback. The engine keeps its tick counter when you switch — no gap, no stutter.
+
+| Key | Action |
+|-----|--------|
+| P | Commit: duplicate current pattern to a new one and switch editor to it |
+| Shift+, (<) | Switch to previous pattern |
+| Shift+. (>) | Switch to next pattern |
+
+When multiple patterns exist, the status bar shows `P:N/M` (e.g. `P:2/3` = editing pattern 2 of 3). Pattern switching during playback is legato — the engine continues from the exact tick position, just reading from the new pattern's event list.
 
 ### Non-ripple ST edit
 
@@ -197,16 +210,18 @@ UI thread locks `sequenceMutex` for all edits. Audio thread calls `try_lock` —
 - 4-channel tick-based sequencer with relative timing
 - Full keyboard-driven text UI with live preview
 - Per-event velocity with base/accent/per-event layering
-- Insert, delete, divide, join operations
+- Insert (before/after), delete, divide, join operations
 - Copy (overwrite and ripple) with transpose
 - Repeat marks with nested playback
 - Non-ripple ST editing (micro-timing adjustment)
 - Measure markers with navigation
-- Undo/redo (50 levels)
+- Measure rotation (circular shift by tick offset)
+- Multi-pattern system with seamless legato switching
+- Undo/redo (50 levels, snapshots all patterns)
 - Host tempo sync
 - Cycle (loop) mode
 - Configurable default note and base velocity
-- JSON state save/load (full session persistence)
+- JSON state save/load (full session persistence, backwards-compatible)
 - MIDI step recording from external controller
 
 **Not yet implemented:**
@@ -215,4 +230,4 @@ UI thread locks `sequenceMutex` for all edits. Audio thread calls `try_lock` —
 - Tables (M8-style automation)
 - Real-time MIDI recording (quantised to timebase while transport runs)
 - MPE expression output beyond note-on velocity
-- Pattern chaining across channels
+- Pattern chaining / song mode (ordered playback of multiple patterns)
