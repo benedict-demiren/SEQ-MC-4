@@ -1,0 +1,10 @@
+build/
+cmake-build-*/
+.vscode/
+.idea/
+*.xcworkspace/
+*.xcuserdata/
+.DS_Store
+._*
+*.pch
+*.gch
